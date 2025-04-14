@@ -15,24 +15,24 @@ const vk_alloc_cbs = @import("core.zig").vkallocationcallbacks;
 
 pub const frames_in_flight = 2;
 
-pub const FrameContext = struct {
+pub const FrameSubmitContext = struct {
     swapchain_semaphore: c.VkSemaphore = null,
     render_semaphore: c.VkSemaphore = null,
     render_fence: c.VkFence = null,
     command_pool: c.VkCommandPool = null,
     command_buffer: c.VkCommandBuffer = null,
-    descriptors: Allocator = .{},
-    buffers: buffers.PerFrameBuffers = undefined,
-    sets: [2]c.VkDescriptorSet = undefined,
-    swapchain_image_index: u32 = 0,
-    draw_extent: c.VkExtent2D = undefined,
+    // descriptors: Allocator = .{},
+    // buffers: buffers.PerFrameBuffers = undefined,
+    // sets: [2]c.VkDescriptorSet = undefined,
+    // swapchain_image_index: u32 = 0,
+    // draw_extent: c.VkExtent2D = undefined,
 
-    pub fn destroyBuffers(self: *FrameContext, core: *Core) void {
-        c.vmaDestroyBuffer(core.gpuallocator, self.buffers.scenedata.buffer, self.buffers.scenedata.allocation);
-        c.vmaDestroyBuffer(core.gpuallocator, self.buffers.poses.buffer, self.buffers.poses.allocation);
-    }
+    // pub fn destroyBuffers(self: *FrameSubmitContext, core: *Core) void {
+    //     c.vmaDestroyBuffer(core.gpuallocator, self.buffers.scenedata.buffer, self.buffers.scenedata.allocation);
+    //     c.vmaDestroyBuffer(core.gpuallocator, self.buffers.poses.buffer, self.buffers.poses.allocation);
+    // }
 
-    pub fn submitBegin(frame: *FrameContext, core: *Core) !void {
+    pub fn submitBegin(frame: *FrameSubmitContext, core: *Core) !void {
         const timeout: u64 = 4_000_000_000; // 4 second in nanonesconds
         const images = &core.images;
         debug.check_vk_panic(c.vkWaitForFences(core.device.handle, 1, &frame.render_fence, c.VK_TRUE, timeout));
@@ -54,10 +54,10 @@ pub const FrameContext = struct {
         debug.check_vk(c.vkResetCommandBuffer(frame.command_buffer, 0)) catch @panic("Failed to reset command buffer");
 
         const cmd = frame.command_buffer;
-        const cmd_begin_info = std.mem.zeroInit(c.VkCommandBufferBeginInfo, .{
+        const cmd_begin_info: c.VkCommandBufferBeginInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        });
+        };
 
         var draw_extent: c.VkExtent2D = .{};
         const render_scale = 1;
@@ -132,7 +132,7 @@ pub const FrameContext = struct {
         c.vkCmdSetScissor(cmd, 0, 1, &scissor);
     }
 
-    pub fn submitEnd(frame: *FrameContext, core: *Core) void {
+    pub fn submitEnd(frame: *FrameSubmitContext, core: *Core) void {
         const images = core.images;
         const cmd = frame.command_buffer;
         c.vkCmdEndRendering(cmd);
@@ -210,8 +210,9 @@ pub const FrameContext = struct {
     }
 };
 
-pub const FrameContexts = struct {
-    frames: [frames_in_flight]FrameContext = .{FrameContext{}} ** frames_in_flight,
+// TODO maybe move this
+pub const FrameSubmitContexts = struct {
+    frames: [frames_in_flight]FrameSubmitContext = .{FrameSubmitContext{}} ** frames_in_flight,
     current: u8 = 0,
 
     pub fn init(core: *Core) void {
@@ -256,13 +257,13 @@ pub const FrameContexts = struct {
                 vk_alloc_cbs,
                 &frame.render_fence,
             ));
-            var ratios = [_]Allocator.PoolSizeRatio{
-                .{ .ratio = 3, .type = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE },
-                .{ .ratio = 3, .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },
-                .{ .ratio = 3, .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },
-                .{ .ratio = 4, .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER },
-            };
-            frame.descriptors.init(core.device.handle, 1000, &ratios, core.cpuallocator);
+            // var ratios = [_]Allocator.PoolSizeRatio{
+            //     .{ .ratio = 3, .type = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE },
+            //     .{ .ratio = 3, .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },
+            //     .{ .ratio = 3, .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },
+            //     .{ .ratio = 4, .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER },
+            // };
+            // frame.descriptors.init(core.device.handle, 1000, &ratios, core.cpuallocator);
         }
     }
 
@@ -272,27 +273,26 @@ pub const FrameContexts = struct {
             c.vkDestroyFence(core.device.handle, frame.render_fence, vk_alloc_cbs);
             c.vkDestroySemaphore(core.device.handle, frame.render_semaphore, vk_alloc_cbs);
             c.vkDestroySemaphore(core.device.handle, frame.swapchain_semaphore, vk_alloc_cbs);
-            frame.descriptors.deinit(core.device.handle);
-            frame.destroyBuffers(core);
+            // frame.descriptors.deinit(core.device.handle);
+            // frame.destroyBuffers(core);
         }
     }
 
-    pub fn switch_frame(self: *FrameContexts) void {
+    pub fn switch_frame(self: *FrameSubmitContexts) void {
         self.current = (self.current + 1) % frames_in_flight;
     }
 };
 
-pub const AsyncContext = struct {
+pub const SubmitContext = struct {
     fence: c.VkFence = null,
     command_pool: c.VkCommandPool = null,
     command_buffer: c.VkCommandBuffer = null,
 
-    pub fn init(core: *Core) void {
-        var self = &core.asynccontext;
+    pub fn init(self: *@This(), device: Device, physicaldevice: PhysicalDevice) void {
         const command_pool_ci: c.VkCommandPoolCreateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             .flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-            .queueFamilyIndex = core.physicaldevice.graphics_queue_family,
+            .queueFamilyIndex = physicaldevice.graphics_queue_family,
         };
 
         const upload_fence_ci: c.VkFenceCreateInfo = .{
@@ -300,7 +300,7 @@ pub const AsyncContext = struct {
         };
 
         debug.check_vk_panic(c.vkCreateFence(
-            core.device.handle,
+            device.handle,
             &upload_fence_ci,
             Core.vkallocationcallbacks,
             &self.fence,
@@ -308,7 +308,7 @@ pub const AsyncContext = struct {
         log.info("Created sync structures", .{});
 
         debug.check_vk_panic(c.vkCreateCommandPool(
-            core.device.handle,
+            device.handle,
             &command_pool_ci,
             Core.vkallocationcallbacks,
             &self.command_pool,
@@ -321,19 +321,18 @@ pub const AsyncContext = struct {
             .commandBufferCount = 1,
         };
         debug.check_vk_panic(c.vkAllocateCommandBuffers(
-            core.device.handle,
+            device.handle,
             &upload_command_buffer_ai,
             &self.command_buffer,
         ));
     }
 
-    pub fn deinit(core: *Core) void {
-        const self = &core.asynccontext;
-        c.vkDestroyCommandPool(core.device.handle, self.command_pool, Core.vkallocationcallbacks);
-        c.vkDestroyFence(core.device.handle, self.fence, Core.vkallocationcallbacks);
+    pub fn deinit(self: *@This(), device: Device) void {
+        c.vkDestroyCommandPool(device.handle, self.command_pool, Core.allocationcallbacks);
+        c.vkDestroyFence(device.handle, self.fence, Core.allocationcallbacks);
     }
 
-    pub fn submitBegin(core: *Core) void {
+    pub fn begin(core: *Core) void {
         var self = &core.asynccontext;
         debug.check_vk(c.vkResetFences(core.device.handle, 1, &self.fence)) catch @panic("Failed to reset immidiate fence");
         debug.check_vk(c.vkResetCommandBuffer(self.command_buffer, 0)) catch @panic("Failed to reset immidiate command buffer");
@@ -346,7 +345,7 @@ pub const AsyncContext = struct {
         debug.check_vk(c.vkBeginCommandBuffer(cmd, &commmand_begin_ci)) catch @panic("Failed to begin command buffer");
     }
 
-    pub fn submitEnd(core: *Core) void {
+    pub fn end(core: *Core) void {
         var self = &core.asynccontext;
         const cmd = self.command_buffer;
         debug.check_vk(c.vkEndCommandBuffer(cmd)) catch @panic("Failed to end command buffer");
