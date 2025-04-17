@@ -3,10 +3,19 @@ const std = @import("std");
 const debug = @import("debug.zig");
 const Core = @import("core.zig");
 const Images = @import("images.zig");
+const FrameSubmitContext = @import("commands.zig").FrameSubmitContext;
 const alloc_cb = @import("core.zig").vkallocationcallbacks;
 const log = std.log.scoped(.swapchain);
 
 handle: c.VkSwapchainKHR = null,
+resizerequest: bool = false,
+format: c.VkFormat = undefined,
+extent: c.VkExtent2D = .{},
+draw_extent: c.VkExtent2D = .{},
+images: []c.VkImage = &.{},
+imageviews: []c.VkImageView = &.{},
+
+const Self = @This();
 
 pub const SupportInfo = struct {
     capabilities: c.VkSurfaceCapabilitiesKHR = undefined,
@@ -31,7 +40,12 @@ pub const SupportInfo = struct {
             log.err("failed to alloc", .{});
             @panic("");
         };
-        debug.check_vk_panic(c.vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &present_mode_count, present_modes.ptr));
+        debug.check_vk_panic(c.vkGetPhysicalDeviceSurfacePresentModesKHR(
+            device,
+            surface,
+            &present_mode_count,
+            present_modes.ptr,
+        ));
 
         return .{
             .capabilities = capabilities,
@@ -65,7 +79,10 @@ pub fn init(core: *Core) void {
     var images = &core.images;
     const old_swapchain = null;
     const vsync = true;
-    const desired_format = .{ .format = c.VK_FORMAT_B8G8R8A8_SRGB, .colorSpace = c.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR };
+    const desired_format = .{
+        .format = c.VK_FORMAT_B8G8R8A8_SRGB,
+        .colorSpace = c.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+    };
     const a = core.cpuallocator;
 
     const support_info = SupportInfo.init(a, core.physicaldevice.handle, core.surface);
@@ -236,23 +253,50 @@ fn create_swapchain_image_views(device: c.VkDevice, image: c.VkImage, format: c.
     return image_view;
 }
 
-pub fn resize(core: *Core) void {
+pub fn acquireNextImage(self: *Self, core: *Core, frame: *FrameSubmitContext, timeout: u64) !void {
+    const e = c.vkAcquireNextImageKHR(
+        core.device.handle,
+        self.handle,
+        timeout,
+        frame.swapchain_semaphore,
+        null,
+        &frame.swapchain_image_index,
+    );
+    if (e == c.VK_ERROR_OUT_OF_DATE_KHR) {
+        self.resizerequest = true;
+        return error.SwapchainOutOfDate;
+    }
+}
+
+pub fn resize(self: *Self, core: *Core) void {
     debug.check_vk(c.vkDeviceWaitIdle(core.device.handle)) catch |err| {
         std.log.err("Failed to wait for device idle with error: {s}", .{@errorName(err)});
         @panic("Failed to wait for device idle");
     };
     deinit(core);
-    c.vmaDestroyImage(core.gpuallocator, core.images.colorattachment.image, core.images.colorattachment.allocation,);
+    c.vmaDestroyImage(
+        core.gpuallocator,
+        self.colorattachment.image,
+        self.colorattachment.allocation,
+    );
     c.vkDestroyImageView(core.device.handle, core.images.colorattachment.views[0], null);
-    c.vmaDestroyImage(core.gpuallocator, core.images.resolvedattachment.image, core.images.resolvedattachment.allocation,);
-    c.vkDestroyImageView(core.device.handle, core.images.resolvedattachment.views[0], null);
-    c.vmaDestroyImage(core.gpuallocator, core.images.depthstencilattachment.image, core.images.depthstencilattachment.allocation,);
-    c.vkDestroyImageView(core.device.handle, core.images.depthstencilattachment.views[0], null);
-    for (core.images.swapchain_views) |view| {
+    c.vmaDestroyImage(
+        core.gpuallocator,
+        self.resolvedattachment.image,
+        self.resolvedattachment.allocation,
+    );
+    c.vkDestroyImageView(core.device.handle, self.resolvedattachment.views[0], null);
+    c.vmaDestroyImage(
+        core.gpuallocator,
+        self.depthstencilattachment.image,
+        self.depthstencilattachment.allocation,
+    );
+    c.vkDestroyImageView(core.device.handle, self.depthstencilattachment.views[0], null);
+    for (self.imageviews) |view| {
         c.vkDestroyImageView(core.device.handle, view, null);
     }
     core.swapchain = .{};
     init(core);
     Images.createRenderAttachments(core);
-    core.resizerequest = false;
+    self.resizerequest = false;
 }

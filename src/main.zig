@@ -4,7 +4,7 @@ const c = @import("clibs");
 const Core = @import("vulkan/core.zig");
 const Swapchain = @import("vulkan/swapchain.zig");
 const Window = @import("window.zig");
-const FrameContext = commands.FrameContext;
+const FrameSubmitContext = commands.FrameSubmitContext;
 const buffer = @import("vulkan/buffers.zig");
 const Vertex = buffer.Vertex;
 const gltf = @import("gltf.zig");
@@ -21,7 +21,7 @@ const Vec4 = geometry.Vec4(f32);
 const Mat4x4 = geometry.Mat4x4(f32);
 
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{ .safety = true }){}; //TODO add option for releasemode allocator
+    var gpa = std.heap.DebugAllocator(.{ .safety = true }){};
     const allocator = gpa.allocator();
     var window: Window = .init(1200, 1000);
     defer window.deinit();
@@ -51,7 +51,18 @@ const Pipelines = struct {
     }
 };
 
-pub fn uploadSceneData(core: *Core, frame: *FrameContext, view: Mat4x4) void {
+pub fn FrameSubmitContexts(frames_in_flight: comptime_int) type {
+    return struct {
+        frames: [frames_in_flight]FrameSubmitContext = .{FrameSubmitContext{}} ** frames_in_flight,
+        current: u8 = 0,
+
+        pub fn switch_frame(self: *FrameSubmitContexts) void {
+            self.current = (self.current + 1) % frames_in_flight;
+        }
+    };
+}
+
+pub fn uploadSceneData(core: *Core, frame: *FrameSubmitContext, view: Mat4x4) void {
     var scene_uniform_data: *SceneDataUniform = @alignCast(@ptrCast(frame.buffers.scenedata.info.pMappedData.?));
     scene_uniform_data.view = view;
     scene_uniform_data.proj = Mat4x4.perspective(

@@ -15,7 +15,6 @@ const Mat4x4 = geometry.Mat4x4(f32);
 const ResourceEntry = buffer.ResourceEntry;
 const Writer = descritpormanager.Writer;
 const Allocator = descritpormanager.Allocator;
-const FrameSubmitContexts = commands.FrameSubmitContexts;
 const SubmitContext = commands.SubmitContext;
 const Window = @import("../window.zig");
 const Instance = @import("instance.zig");
@@ -27,7 +26,6 @@ const Images = @import("images.zig");
 pub const allocationcallbacks: ?*c.VkAllocationCallbacks = null;
 const Self = @This();
 
-resizerequest: bool = false,
 framenumber: u64 = 0,
 cpuallocator: std.mem.Allocator = undefined,
 gpuallocator: c.VmaAllocator = undefined,
@@ -36,11 +34,7 @@ instance: Instance = .{},
 physicaldevice: PhysicalDevice = .{},
 device: Device = .{},
 swapchain: Swapchain = .{},
-framecontexts: FrameSubmitContexts = .{},
-asynccontext: SubmitContext = .{},
 descriptorallocator: Allocator = .{},
-sets: [2]c.VkDescriptorSet = undefined,
-buffers: buffer.GlobalBuffers = .{},
 
 pub fn init(allocator: std.mem.Allocator, window: *Window) Self {
     var self: Self = .{};
@@ -62,11 +56,7 @@ pub fn init(allocator: std.mem.Allocator, window: *Window) Self {
     };
     debug.check_vk_panic(c.vmaCreateAllocator(&allocator_ci, &self.gpuallocator));
 
-    Images.createRenderAttachments(&self);
     Swapchain.init(&self);
-    FrameSubmitContexts.init(&self);
-    SubmitContext.init(&self);
-    Images.createDefaultTextures(&self);
     initallocator.deinit();
     return self;
 }
@@ -82,7 +72,4 @@ pub fn deinit(self: *Self) void {
     defer c.vkDestroyDevice(self.device.handle, allocationcallbacks);
     defer c.vmaDestroyAllocator(self.gpuallocator);
     defer Swapchain.deinit(self);
-    defer FrameContexts.deinit(self);
-    defer AsyncContext.deinit(self);
-    defer Images.deinit(self);
 }

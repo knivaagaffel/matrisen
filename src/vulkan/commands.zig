@@ -8,12 +8,11 @@ const geometry = @import("geometry");
 const Mat4x4 = geometry.Mat4x4(f32);
 const Allocator = descriptormanager.Allocator;
 const Writer = descriptormanager.Writer;
+const AllocatedImage = @import("images.zig").AllocatedImage(1);
 const Core = @import("core.zig");
 const Device = @import("device.zig").Device;
 const PhysicalDevice = @import("device.zig").PhysicalDevice;
 const vk_alloc_cbs = @import("core.zig").vkallocationcallbacks;
-
-pub const frames_in_flight = 2;
 
 pub const FrameSubmitContext = struct {
     swapchain_semaphore: c.VkSemaphore = null,
@@ -21,37 +20,219 @@ pub const FrameSubmitContext = struct {
     render_fence: c.VkFence = null,
     command_pool: c.VkCommandPool = null,
     command_buffer: c.VkCommandBuffer = null,
-    // descriptors: Allocator = .{},
-    // buffers: buffers.PerFrameBuffers = undefined,
-    // sets: [2]c.VkDescriptorSet = undefined,
-    // swapchain_image_index: u32 = 0,
-    // draw_extent: c.VkExtent2D = undefined,
+    swapchain_image_index: u32 = 0,
+    renderattachmentformat: c.VkFormat = c.VK_FORMAT_R16G16B16A16_SFLOAT,
+    depth_format: c.VkFormat = c.VK_FORMAT_D32_SFLOAT,
+    colorattachment: AllocatedImage = undefined,
+    resolvedattachment: AllocatedImage = undefined,
+    depthstencilattachment: AllocatedImage = undefined,
 
-    // pub fn destroyBuffers(self: *FrameSubmitContext, core: *Core) void {
-    //     c.vmaDestroyBuffer(core.gpuallocator, self.buffers.scenedata.buffer, self.buffers.scenedata.allocation);
-    //     c.vmaDestroyBuffer(core.gpuallocator, self.buffers.poses.buffer, self.buffers.poses.allocation);
-    // }
+    pub fn init(self: *FrameSubmitContext, core: *Core) void {
+        const semaphore_ci = c.VkSemaphoreCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        };
+
+        const fence_ci = c.VkFenceCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+            .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
+        };
+        const command_pool_info = graphics_cmd_pool_info(core.physicaldevice);
+        debug.check_vk_panic(c.vkCreateCommandPool(
+            core.device.handle,
+            &command_pool_info,
+            vk_alloc_cbs,
+            &self.command_pool,
+        ));
+        const command_buffer_info = graphics_cmdbuffer_info(self.command_pool);
+        debug.check_vk_panic(c.vkAllocateCommandBuffers(
+            core.device.handle,
+            &command_buffer_info,
+            &self.command_buffer,
+        ));
+        debug.check_vk_panic(c.vkCreateSemaphore(
+            core.device.handle,
+            &semaphore_ci,
+            vk_alloc_cbs,
+            &self.swapchain_semaphore,
+        ));
+        debug.check_vk_panic(c.vkCreateSemaphore(
+            core.device.handle,
+            &semaphore_ci,
+            vk_alloc_cbs,
+            &self.render_semaphore,
+        ));
+        debug.check_vk_panic(c.vkCreateFence(
+            core.device.handle,
+            &fence_ci,
+            vk_alloc_cbs,
+            &self.render_fence,
+        ));
+    }
+
+    pub fn createRenderAttachments(core: *Core) void {
+        var self = &core.images;
+        const extent: c.VkExtent3D = .{
+            .width = self.swapchain_extent.width,
+            .height = self.swapchain_extent.height,
+            .depth = 1,
+        };
+        self.extent3d[0] = extent;
+
+        const draw_image_ci: c.VkImageCreateInfo = .{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = c.VK_IMAGE_TYPE_2D,
+            .format = self.renderattachmentformat,
+            .extent = extent,
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = c.VK_SAMPLE_COUNT_4_BIT,
+            .tiling = c.VK_IMAGE_TILING_OPTIMAL,
+            .usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                c.VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+        };
+
+        const draw_image_ai: c.VmaAllocationCreateInfo = .{
+            .usage = c.VMA_MEMORY_USAGE_GPU_ONLY,
+            .requiredFlags = c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        };
+
+        debug.check_vk_panic(c.vmaCreateImage(
+            core.gpuallocator,
+            &draw_image_ci,
+            &draw_image_ai,
+            &self.colorattachment.image,
+            &self.colorattachment.allocation,
+            null,
+        ));
+        const draw_image_view_ci: c.VkImageViewCreateInfo = .{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = self.colorattachment.image,
+            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+            .format = self.renderattachmentformat,
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        debug.check_vk_panic(c.vkCreateImageView(
+            core.device.handle,
+            &draw_image_view_ci,
+            Core.vkallocationcallbacks,
+            &self.colorattachment.views[0],
+        ));
+        const resolved_image_ci: c.VkImageCreateInfo = .{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = c.VK_IMAGE_TYPE_2D,
+            .format = self.renderattachmentformat,
+            .extent = extent,
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = c.VK_SAMPLE_COUNT_1_BIT,
+            .tiling = c.VK_IMAGE_TILING_OPTIMAL,
+            .usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                c.VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                c.VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        };
+
+        const resolved_image_ai: c.VmaAllocationCreateInfo = .{
+            .usage = c.VMA_MEMORY_USAGE_GPU_ONLY,
+            .requiredFlags = c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        };
+
+        debug.check_vk_panic(c.vmaCreateImage(
+            core.gpuallocator,
+            &resolved_image_ci,
+            &resolved_image_ai,
+            &self.resolvedattachment.image,
+            &self.resolvedattachment.allocation,
+            null,
+        ));
+        const resolved_view_ci: c.VkImageViewCreateInfo = .{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = self.resolvedattachment.image,
+            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+            .format = self.renderattachmentformat,
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        debug.check_vk_panic(c.vkCreateImageView(
+            core.device.handle,
+            &resolved_view_ci,
+            Core.vkallocationcallbacks,
+            &self.resolvedattachment.views[0],
+        ));
+
+        const depth_extent = extent;
+        const depth_image_ci: c.VkImageCreateInfo = .{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = c.VK_IMAGE_TYPE_2D,
+            .format = self.depth_format,
+            .extent = depth_extent,
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = c.VK_SAMPLE_COUNT_4_BIT,
+            .tiling = c.VK_IMAGE_TILING_OPTIMAL,
+            .usage = c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                c.VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+        };
+
+        debug.check_vk_panic(c.vmaCreateImage(
+            core.gpuallocator,
+            &depth_image_ci,
+            &draw_image_ai,
+            &self.depthstencilattachment.image,
+            &self.depthstencilattachment.allocation,
+            null,
+        ));
+
+        const depth_image_view_ci: c.VkImageViewCreateInfo = .{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = self.depthstencilattachment.image,
+            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+            .format = self.depth_format,
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_DEPTH_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        debug.check_vk_panic(c.vkCreateImageView(
+            core.device.handle,
+            &depth_image_view_ci,
+            Core.vkallocationcallbacks,
+            &self.depthstencilattachment.views[0],
+        ));
+    }
+
+    pub fn deinit(self: *FrameSubmitContext, core: *Core) void {
+        c.vkDestroyCommandPool(core.device.handle, self.command_pool, vk_alloc_cbs);
+        c.vkDestroyFence(core.device.handle, self.render_fence, vk_alloc_cbs);
+        c.vkDestroySemaphore(core.device.handle, self.render_semaphore, vk_alloc_cbs);
+        c.vkDestroySemaphore(core.device.handle, self.swapchain_semaphore, vk_alloc_cbs);
+    }
 
     pub fn submitBegin(frame: *FrameSubmitContext, core: *Core) !void {
         const timeout: u64 = 4_000_000_000; // 4 second in nanonesconds
         const images = &core.images;
         debug.check_vk_panic(c.vkWaitForFences(core.device.handle, 1, &frame.render_fence, c.VK_TRUE, timeout));
 
-        const e = c.vkAcquireNextImageKHR(
-            core.device.handle,
-            core.swapchain.handle,
-            timeout,
-            frame.swapchain_semaphore,
-            null,
-            &frame.swapchain_image_index,
-        );
-        if (e == c.VK_ERROR_OUT_OF_DATE_KHR) {
-            core.resizerequest = true;
-            return error.SwapchainOutOfDate;
-        }
-
-        debug.check_vk(c.vkResetFences(core.device.handle, 1, &frame.render_fence)) catch @panic("Failed to reset render fence");
-        debug.check_vk(c.vkResetCommandBuffer(frame.command_buffer, 0)) catch @panic("Failed to reset command buffer");
+        core.swapchain.acquireNextImage(core, frame, timeout);
+        debug.check_vk(c.vkResetFences(core.device.handle, 1, &frame.render_fence)) catch
+            @panic("Failed to reset render fence");
+        debug.check_vk(c.vkResetCommandBuffer(frame.command_buffer, 0)) catch
+            @panic("Failed to reset command buffer");
 
         const cmd = frame.command_buffer;
         const cmd_begin_info: c.VkCommandBufferBeginInfo = .{
@@ -59,17 +240,7 @@ pub const FrameSubmitContext = struct {
             .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         };
 
-        var draw_extent: c.VkExtent2D = .{};
-        const render_scale = 1;
-        draw_extent.width = @intFromFloat(@as(f32, @floatFromInt(@min(
-            images.swapchain_extent.width,
-            images.swapchain_extent.width,
-        ))) * render_scale);
-        draw_extent.height = @intFromFloat(@as(f32, @floatFromInt(@min(
-            images.swapchain_extent.height,
-            images.swapchain_extent.height,
-        ))) * render_scale);
-        frame.draw_extent = draw_extent;
+        const draw_extent = core.swapchain.draw_extent;
 
         debug.check_vk(c.vkBeginCommandBuffer(cmd, &cmd_begin_info)) catch @panic("Failed to begin command buffer");
         const clearvalue = c.VkClearColorValue{ .float32 = .{ 0.014, 0.014, 0.014, 1 } };
@@ -135,6 +306,7 @@ pub const FrameSubmitContext = struct {
     pub fn submitEnd(frame: *FrameSubmitContext, core: *Core) void {
         const images = core.images;
         const cmd = frame.command_buffer;
+        const draw_extent = core.swapchain.draw_extent;
         c.vkCmdEndRendering(cmd);
         transition_image(
             cmd,
@@ -152,7 +324,7 @@ pub const FrameSubmitContext = struct {
             cmd,
             images.resolvedattachment.image,
             images.swapchain[frame.swapchain_image_index],
-            frame.draw_extent,
+            draw_extent,
             images.swapchain_extent,
         );
         transition_image(
@@ -210,79 +382,6 @@ pub const FrameSubmitContext = struct {
     }
 };
 
-// TODO maybe move this
-pub const FrameSubmitContexts = struct {
-    frames: [frames_in_flight]FrameSubmitContext = .{FrameSubmitContext{}} ** frames_in_flight,
-    current: u8 = 0,
-
-    pub fn init(core: *Core) void {
-        const semaphore_ci = c.VkSemaphoreCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-        };
-
-        const fence_ci = c.VkFenceCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-            .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
-        };
-
-        for (&core.framecontexts.frames) |*frame| {
-            const command_pool_info = graphics_cmd_pool_info(core.physicaldevice);
-            debug.check_vk_panic(c.vkCreateCommandPool(
-                core.device.handle,
-                &command_pool_info,
-                vk_alloc_cbs,
-                &frame.command_pool,
-            ));
-            const command_buffer_info = graphics_cmdbuffer_info(frame.command_pool);
-            debug.check_vk_panic(c.vkAllocateCommandBuffers(
-                core.device.handle,
-                &command_buffer_info,
-                &frame.command_buffer,
-            ));
-            debug.check_vk_panic(c.vkCreateSemaphore(
-                core.device.handle,
-                &semaphore_ci,
-                vk_alloc_cbs,
-                &frame.swapchain_semaphore,
-            ));
-            debug.check_vk_panic(c.vkCreateSemaphore(
-                core.device.handle,
-                &semaphore_ci,
-                vk_alloc_cbs,
-                &frame.render_semaphore,
-            ));
-            debug.check_vk_panic(c.vkCreateFence(
-                core.device.handle,
-                &fence_ci,
-                vk_alloc_cbs,
-                &frame.render_fence,
-            ));
-            // var ratios = [_]Allocator.PoolSizeRatio{
-            //     .{ .ratio = 3, .type = c.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE },
-            //     .{ .ratio = 3, .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },
-            //     .{ .ratio = 3, .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },
-            //     .{ .ratio = 4, .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER },
-            // };
-            // frame.descriptors.init(core.device.handle, 1000, &ratios, core.cpuallocator);
-        }
-    }
-
-    pub fn deinit(core: *Core) void {
-        for (&core.framecontexts.frames) |*frame| {
-            c.vkDestroyCommandPool(core.device.handle, frame.command_pool, vk_alloc_cbs);
-            c.vkDestroyFence(core.device.handle, frame.render_fence, vk_alloc_cbs);
-            c.vkDestroySemaphore(core.device.handle, frame.render_semaphore, vk_alloc_cbs);
-            c.vkDestroySemaphore(core.device.handle, frame.swapchain_semaphore, vk_alloc_cbs);
-            // frame.descriptors.deinit(core.device.handle);
-            // frame.destroyBuffers(core);
-        }
-    }
-
-    pub fn switch_frame(self: *FrameSubmitContexts) void {
-        self.current = (self.current + 1) % frames_in_flight;
-    }
-};
-
 pub const SubmitContext = struct {
     fence: c.VkFence = null,
     command_pool: c.VkCommandPool = null,
@@ -334,15 +433,18 @@ pub const SubmitContext = struct {
 
     pub fn begin(core: *Core) void {
         var self = &core.asynccontext;
-        debug.check_vk(c.vkResetFences(core.device.handle, 1, &self.fence)) catch @panic("Failed to reset immidiate fence");
-        debug.check_vk(c.vkResetCommandBuffer(self.command_buffer, 0)) catch @panic("Failed to reset immidiate command buffer");
+        debug.check_vk(c.vkResetFences(core.device.handle, 1, &self.fence)) catch
+            @panic("Failed to reset immidiate fence");
+        debug.check_vk(c.vkResetCommandBuffer(self.command_buffer, 0)) catch
+            @panic("Failed to reset immidiate command buffer");
         const cmd = self.command_buffer;
 
         const commmand_begin_ci: c.VkCommandBufferBeginInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         };
-        debug.check_vk(c.vkBeginCommandBuffer(cmd, &commmand_begin_ci)) catch @panic("Failed to begin command buffer");
+        debug.check_vk(c.vkBeginCommandBuffer(cmd, &commmand_begin_ci)) catch
+            @panic("Failed to begin command buffer");
     }
 
     pub fn end(core: *Core) void {
